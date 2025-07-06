@@ -1,12 +1,11 @@
 """
-engines/google_tts.py - Google Cloud Text-to-Speech Engine (BULLETPROOF VERSION)
+engines/google_tts.py - Google Cloud Text-to-Speech Engine (CORRIGIDO)
 
-Responsibilities:
-- BULLETPROOF voice forcing for accent preservation
-- Automatic fallback system for all errors
-- Support both Cloud SDK and REST API
-- Handle text length limitations by splitting into segments
-- SPECIAL HANDLING: English voice type uses native language (no forcing)
+CORREÇÕES APLICADAS:
+- SSML DESABILITADO por padrão (evita erro de suporte)
+- VOICE FORCING DESABILITADO (permite voz PT-BR falar inglês)
+- Voice ID usado EXATAMENTE como configurado (sem conversões)
+- Suporte para cross-language (voz brasileira falando inglês)
 """
 
 import os
@@ -21,7 +20,7 @@ from pydub import AudioSegment
 from core.utils import ENV, logger, ROOT
 
 # ============================================
-# CONFIGURAÇÕES AJUSTÁVEIS - BULLETPROOF
+# CONFIGURAÇÕES CORRIGIDAS - SEM VOICE FORCING
 # ============================================
 
 # Text processing
@@ -31,64 +30,17 @@ MAX_BYTES_PER_REQUEST = 800  # Google TTS character limit
 SPEAKING_RATE = 1.1  # Ligeiramente mais rápido
 VOLUME_GAIN = 0.0  # Volume neutro
 
-# === BULLETPROOF VOICE FORCING ===
-ENABLE_VOICE_FORCING = True  # Ativar forçamento de voz
-AUTO_FALLBACK_ON_ERROR = True  # Fallback automático
+# === CORREÇÕES PRINCIPAIS ===
+ENABLE_VOICE_FORCING = False  # ❌ DESABILITADO - permite voz PT falar inglês
+AUTO_FALLBACK_ON_ERROR = True  # ✅ Fallback automático
 MAX_FALLBACK_ATTEMPTS = 3  # Máximo de tentativas
+USE_SSML_BY_DEFAULT = False  # ❌ DESABILITADO - evita erro de suporte
 
-# === EXCEÇÕES DE VOICE FORCING ===
-ENGLISH_VOICE_FORCING = False  # NÃO forçar para voice type "english"
-# Se True: voz brasileira fala inglês (com sotaque)
-# Se False: voz americana fala inglês (nativo)
-
-# === VOICE-LANGUAGE MAPPING ===
-VOICE_LANGUAGE_MAP = {
-    # Tailandês
-    "th-TH-Chirp3-HD-Laomedeia": "th-TH",
-    "th-TH-Standard-A": "th-TH",
-    "th-TH-Neural2-C": "th-TH",
-    
-    # Chinês
-    "cmn-CN-Chirp3-HD-Leda": "cmn-CN",
-    "zh-CN-Standard-A": "zh-CN", 
-    "zh-CN-Neural2-A": "zh-CN",
-    "zh-TW-Standard-A": "zh-TW",
-    
-    # Árabe
-    "ar-XA-Chirp3-HD-Achird": "ar-XA",
-    "ar-XA-Standard-A": "ar-XA",
-    "ar-XA-Neural2-A": "ar-XA",
-    
-    # Português
-    "pt-BR-Standard-A": "pt-BR",
-    "pt-BR-Neural2-A": "pt-BR",
-    "pt-BR-Chirp3-HD-Sigma": "pt-BR",
-    "pt-BR-Chirp3-HD-Laomedeia": "pt-BR",
-    
-    # Francês
-    "fr-FR-Standard-A": "fr-FR",
-    "fr-FR-Neural2-A": "fr-FR",
-    "fr-FR-Chirp3-HD-Alpha": "fr-FR",
-    
-    # Coreano
-    "ko-KR-Standard-A": "ko-KR",
-    "ko-KR-Neural2-A": "ko-KR",
-    "ko-KR-Chirp3-HD-Aoede": "ko-KR",
-    
-    # Turco
-    "tr-TR-Chirp3-HD-Achernar": "tr-TR",
-    
-    # Inglês (referência)
-    "en-US-Chirp3-HD-Luna": "en-US",
-    "en-GB-Chirp3-HD-Gacrux": "en-GB",
-    "en-AU-Chirp-HD-O": "en-AU"
-}
-
-# === FALLBACK CHAIN CONFIGURATION ===
+# === CONFIGURAÇÕES DE ESTRATÉGIA ===
 FALLBACK_STRATEGIES = [
-    {"ssml": True, "voice_forcing": True},   # Tentativa 1: SSML + Voice Forcing
-    {"ssml": False, "voice_forcing": True},  # Tentativa 2: Texto puro + Voice Forcing  
-    {"ssml": False, "voice_forcing": False}  # Tentativa 3: Texto puro + idioma original
+    {"ssml": False, "voice_forcing": False},  # Tentativa 1: Texto puro + Voice ID exato
+    {"ssml": False, "voice_forcing": False},  # Tentativa 2: Mesmo (retry)
+    {"ssml": False, "voice_forcing": False}   # Tentativa 3: Mesmo (última chance)
 ]
 
 # === TEXT PROCESSING ===
@@ -106,8 +58,8 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 class GoogleTTS:
     """
-    Google Cloud Text-to-Speech Engine (BULLETPROOF VERSION)
-    Guaranteed to work with voice forcing and comprehensive fallbacks
+    Google Cloud Text-to-Speech Engine (CORRIGIDO)
+    Permite voz portuguesa falar inglês sem voice forcing
     """
     
     def __init__(self):
@@ -120,9 +72,9 @@ class GoogleTTS:
         
         # Log initialization method
         if self.use_cloud_sdk:
-            logger.info("Google TTS initialized with Cloud SDK (Bulletproof Mode)")
+            logger.info("Google TTS initialized with Cloud SDK (Cross-Language Mode)")
         elif self.api_key:
-            logger.info("Google TTS initialized with REST API (Bulletproof Mode)")
+            logger.info("Google TTS initialized with REST API (Cross-Language Mode)")
         else:
             logger.warning("Google TTS not configured (no SDK or API key)")
     
@@ -153,9 +105,10 @@ class GoogleTTS:
     def validate_voice_id(self, voice_id: str) -> bool:
         """
         Validate if voice ID exists and is available
+        CORREÇÃO: Validação mais permissiva
         
         Args:
-            voice_id: Google voice ID (e.g., "th-TH-Chirp3-HD-Laomedeia")
+            voice_id: Google voice ID (e.g., "pt-BR-Chirp3-HD-Laomedeia")
             
         Returns:
             bool: True if voice is valid
@@ -165,7 +118,7 @@ class GoogleTTS:
         
         # Basic format validation for Google voice IDs
         # Format: language-country-model-quality-name
-        # Example: th-TH-Chirp3-HD-Laomedeia
+        # Example: pt-BR-Chirp3-HD-Laomedeia
         
         parts = voice_id.split('-')
         if len(parts) < 2:
@@ -175,28 +128,29 @@ class GoogleTTS:
         # Extract language code
         language_code = f"{parts[0]}-{parts[1]}"
         
-        # Common language codes validation
+        # CORREÇÃO: Validação mais permissiva - aceita mais idiomas
         valid_languages = [
             "en-US", "en-GB", "en-AU", "th-TH", "zh-CN", "zh-TW", 
             "ja-JP", "ko-KR", "ar-XA", "fr-FR", "de-DE", "es-ES",
-            "pt-BR", "it-IT", "ru-RU", "hi-IN", "tr-TR"
+            "pt-BR", "it-IT", "ru-RU", "hi-IN", "tr-TR", "cmn-CN"
         ]
         
         if language_code not in valid_languages:
             logger.warning(f"Unsupported language in voice ID: {language_code}")
-            return False
+            # CORREÇÃO: Não falha, apenas avisa
+            logger.info(f"Attempting to use voice anyway: {voice_id}")
         
-        logger.debug(f"Voice ID validation passed: {voice_id}")
+        logger.debug(f"Voice ID accepted: {voice_id}")
         return True
     
     def synthesize(self, text: str, language: str, voice_id: str) -> Path:
         """
-        BULLETPROOF synthesis with comprehensive fallback system
+        CROSS-LANGUAGE synthesis - voz PT pode falar inglês
         
         Args:
-            text: Text to synthesize
-            language: Language code (will be forced if voice forcing enabled)
-            voice_id: Google voice identifier
+            text: Text to synthesize (pode ser inglês)
+            language: Language code (pode ser diferente da voz)
+            voice_id: Google voice identifier (ex: pt-BR-Chirp3-HD-Laomedeia)
             
         Returns:
             Path: Generated WAV file path
@@ -210,44 +164,50 @@ class GoogleTTS:
         if not self.validate_voice_id(voice_id):
             raise ValueError(f"Invalid voice ID: {voice_id}")
         
-        logger.info(f"Google TTS (Bulletproof): Starting synthesis")
+        logger.info(f"Google TTS (Cross-Language): Starting synthesis")
         logger.info(f"  Voice: {voice_id}")
-        logger.info(f"  Requested Language: {language}")
+        logger.info(f"  Text Language: {language}")
+        logger.info(f"  Cross-Language Mode: Voice PT pode falar qualquer idioma")
         logger.debug(f"  Text length: {len(text)} chars, {len(text.encode('utf-8'))} bytes")
         
-        # Try synthesis with fallback chain
+        # Try synthesis with fallback chain (SEM VOICE FORCING)
         last_error = None
         
         for attempt, strategy in enumerate(FALLBACK_STRATEGIES, 1):
             try:
-                logger.info(f"Attempt {attempt}/{len(FALLBACK_STRATEGIES)}: {strategy}")
+                logger.info(f"Attempt {attempt}/{len(FALLBACK_STRATEGIES)}: Cross-language synthesis")
                 
-                # Determine effective language (forced or original)
-                effective_language = self._get_effective_language(voice_id, language, strategy["voice_forcing"])
+                # CORREÇÃO: NÃO forçar idioma, usar voice_id exato
+                effective_voice_id = voice_id  # Usar exatamente como configurado
+                effective_language = self._extract_voice_language(voice_id)  # Extrair idioma da voz
+                
+                logger.debug(f"Using Voice ID: {effective_voice_id}")
+                logger.debug(f"Voice Language: {effective_language}")
+                logger.debug(f"Text Language: {language}")
                 
                 # Process text based on strategy
-                processed_text = self._process_text_for_strategy(text, effective_language, strategy)
+                processed_text = self._process_text_for_strategy(text, language, strategy)
                 
                 # Check if text needs splitting
                 if len(processed_text.encode('utf-8')) <= MAX_BYTES_PER_REQUEST:
                     # Single request
                     logger.debug("Text within limit, single synthesis")
-                    audio_bytes = self._synthesize_single_with_strategy(
-                        processed_text, voice_id, effective_language, strategy
+                    audio_bytes = self._synthesize_single_cross_language(
+                        processed_text, effective_voice_id, effective_language, strategy
                     )
                     return self._save_audio_bytes(audio_bytes, f"attempt_{attempt}")
                 else:
                     # Multiple segments
                     logger.info("Text exceeds limit, splitting into segments")
-                    return self._synthesize_segments_with_strategy(
-                        processed_text, voice_id, effective_language, strategy
+                    return self._synthesize_segments_cross_language(
+                        processed_text, effective_voice_id, effective_language, strategy
                     )
                     
             except Exception as e:
                 last_error = e
                 logger.warning(f"Attempt {attempt} failed: {e}")
                 if attempt < len(FALLBACK_STRATEGIES):
-                    logger.info(f"Trying next fallback strategy...")
+                    logger.info(f"Trying next attempt...")
                 continue
         
         # All attempts failed
@@ -255,58 +215,35 @@ class GoogleTTS:
         logger.error(error_msg)
         raise RuntimeError(error_msg)
     
-    def _get_effective_language(self, voice_id: str, requested_language: str, use_voice_forcing: bool) -> str:
+    def _extract_voice_language(self, voice_id: str) -> str:
         """
-        Determine effective language based on voice forcing strategy
-        WITH SPECIAL HANDLING FOR ENGLISH
+        Extrai idioma da voice ID para usar com Google TTS
         
         Args:
-            voice_id: Voice identifier
-            requested_language: Originally requested language
-            use_voice_forcing: Whether to force voice language
+            voice_id: ex. pt-BR-Chirp3-HD-Laomedeia
             
         Returns:
-            str: Effective language code to use
+            str: ex. pt-BR
         """
-        # SPECIAL CASE: English language should use native voice (no forcing)
-        if requested_language in ["en", "en-US", "en-GB", "en-AU"]:
-            if not ENGLISH_VOICE_FORCING:
-                logger.debug(f"English voice type: using native language {requested_language} (no forcing)")
-                return requested_language
-            else:
-                logger.debug(f"English voice type: applying voice forcing")
-                # Continue with normal voice forcing logic
-        
-        if not use_voice_forcing or not ENABLE_VOICE_FORCING:
-            return requested_language
-        
-        # Check explicit mapping first
-        if voice_id in VOICE_LANGUAGE_MAP:
-            forced_lang = VOICE_LANGUAGE_MAP[voice_id]
-            logger.debug(f"Voice forcing: {voice_id} → {forced_lang} (mapped)")
-            return forced_lang
-        
-        # Auto-extract from voice ID
         try:
             parts = voice_id.split('-')
             if len(parts) >= 2:
                 extracted_lang = f"{parts[0]}-{parts[1]}"
-                logger.debug(f"Voice forcing: {voice_id} → {extracted_lang} (extracted)")
+                logger.debug(f"Extracted language from voice: {extracted_lang}")
                 return extracted_lang
         except Exception as e:
             logger.warning(f"Could not extract language from {voice_id}: {e}")
         
-        # Fallback to requested language
-        logger.debug(f"Voice forcing failed, using requested: {requested_language}")
-        return requested_language
+        # Fallback
+        return "pt-BR"
     
     def _process_text_for_strategy(self, text: str, language: str, strategy: dict) -> str:
         """
-        Process text according to synthesis strategy
+        Process text according to synthesis strategy (SEM SSML por padrão)
         
         Args:
             text: Original text
-            language: Effective language
+            language: Text language
             strategy: Strategy configuration
             
         Returns:
@@ -323,8 +260,8 @@ class GoogleTTS:
             if BASIC_PRONUNCIATION_FIX:
                 processed = self._apply_basic_pronunciation_fixes(processed)
             
-            # Add SSML if strategy requires it
-            if strategy.get("ssml", False):
+            # CORREÇÃO: NÃO adicionar SSML por padrão
+            if strategy.get("ssml", False) and USE_SSML_BY_DEFAULT:
                 processed = self._add_simple_ssml(processed)
             
             return processed
@@ -373,39 +310,40 @@ class GoogleTTS:
             return text
     
     def _add_simple_ssml(self, text: str) -> str:
-        """Add simple SSML wrapper"""
+        """Add simple SSML wrapper (DESABILITADO)"""
         try:
-            # Very basic SSML - just rate control
+            # CORREÇÃO: SSML muito básico ou desabilitado
             return f'<speak><prosody rate="{SPEAKING_RATE}">{text}</prosody></speak>'
             
         except Exception as e:
             logger.warning(f"SSML addition failed: {e}")
             return text
     
-    def _synthesize_single_with_strategy(self, text: str, voice_id: str, language: str, strategy: dict) -> bytes:
-        """Synthesize single text with specific strategy"""
+    def _synthesize_single_cross_language(self, text: str, voice_id: str, voice_language: str, strategy: dict) -> bytes:
+        """Synthesize single text with cross-language support"""
         if self.use_cloud_sdk:
-            return self._synthesize_cloud_sdk_with_strategy(text, voice_id, language, strategy)
+            return self._synthesize_cloud_sdk_cross_language(text, voice_id, voice_language, strategy)
         else:
-            return self._synthesize_rest_api_with_strategy(text, voice_id, language, strategy)
+            return self._synthesize_rest_api_cross_language(text, voice_id, voice_language, strategy)
     
-    def _synthesize_cloud_sdk_with_strategy(self, text: str, voice_id: str, language: str, strategy: dict) -> bytes:
-        """Cloud SDK synthesis with strategy"""
+    def _synthesize_cloud_sdk_cross_language(self, text: str, voice_id: str, voice_language: str, strategy: dict) -> bytes:
+        """Cloud SDK synthesis with cross-language support"""
         from google.cloud import texttospeech
         
-        logger.debug(f"Cloud SDK synthesis: {language} + {voice_id}")
+        logger.debug(f"Cloud SDK cross-language synthesis: {voice_language} voice + any text")
         
-        # Determine input type based on strategy
-        if strategy.get("ssml", False) and text.strip().startswith('<speak>'):
+        # CORREÇÃO: Determinar input type SEM SSML por padrão
+        if strategy.get("ssml", False) and USE_SSML_BY_DEFAULT and text.strip().startswith('<speak>'):
             synthesis_input = texttospeech.SynthesisInput(ssml=text)
             logger.debug("Using SSML input")
         else:
             synthesis_input = texttospeech.SynthesisInput(text=text)
-            logger.debug("Using text input")
+            logger.debug("Using text input (no SSML)")
         
+        # CORREÇÃO: Usar voice_id EXATO e language da voz
         voice = texttospeech.VoiceSelectionParams(
-            language_code=language,
-            name=voice_id
+            language_code=voice_language,  # Idioma da voz (ex: pt-BR)
+            name=voice_id                  # Voice ID exato (ex: pt-BR-Chirp3-HD-Laomedeia)
         )
         
         # Minimal audio config for maximum compatibility
@@ -429,29 +367,29 @@ class GoogleTTS:
             audio_config=audio_config
         )
         
-        logger.debug(f"Cloud SDK synthesis successful: {len(response.audio_content)} bytes")
+        logger.debug(f"Cloud SDK cross-language synthesis successful: {len(response.audio_content)} bytes")
         return response.audio_content
     
-    def _synthesize_rest_api_with_strategy(self, text: str, voice_id: str, language: str, strategy: dict) -> bytes:
-        """REST API synthesis with strategy"""
-        logger.debug(f"REST API synthesis: {language} + {voice_id}")
+    def _synthesize_rest_api_cross_language(self, text: str, voice_id: str, voice_language: str, strategy: dict) -> bytes:
+        """REST API synthesis with cross-language support"""
+        logger.debug(f"REST API cross-language synthesis: {voice_language} voice")
         
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={self.api_key}"
         
-        # Determine input type based on strategy
-        if strategy.get("ssml", False) and text.strip().startswith('<speak>'):
+        # CORREÇÃO: Determinar input type SEM SSML por padrão
+        if strategy.get("ssml", False) and USE_SSML_BY_DEFAULT and text.strip().startswith('<speak>'):
             input_data = {"ssml": text}
             logger.debug("Using SSML input")
         else:
             input_data = {"text": text}
-            logger.debug("Using text input")
+            logger.debug("Using text input (no SSML)")
         
-        # Build request body
+        # CORREÇÃO: Build request body com voice_id EXATO
         body = {
             "input": input_data,
             "voice": {
-                "languageCode": language,
-                "name": voice_id
+                "languageCode": voice_language,  # Idioma da voz (ex: pt-BR)
+                "name": voice_id                 # Voice ID exato
             },
             "audioConfig": {
                 "audioEncoding": "LINEAR16",
@@ -463,6 +401,8 @@ class GoogleTTS:
         # Add volume gain if needed
         if VOLUME_GAIN != 0.0:
             body["audioConfig"]["volumeGainDb"] = VOLUME_GAIN
+        
+        logger.debug(f"API Request: voice={voice_id}, languageCode={voice_language}")
         
         response = requests.post(url, json=body, timeout=30)
         
@@ -478,14 +418,14 @@ class GoogleTTS:
             raise RuntimeError("No audio content in response")
         
         audio_bytes = base64.b64decode(audio_content)
-        logger.debug(f"REST API synthesis successful: {len(audio_bytes)} bytes")
+        logger.debug(f"REST API cross-language synthesis successful: {len(audio_bytes)} bytes")
         return audio_bytes
     
-    def _synthesize_segments_with_strategy(self, text: str, voice_id: str, language: str, strategy: dict) -> Path:
-        """Synthesize multiple segments with strategy"""
+    def _synthesize_segments_cross_language(self, text: str, voice_id: str, voice_language: str, strategy: dict) -> Path:
+        """Synthesize multiple segments with cross-language support"""
         # Split text into segments
         segments = self._split_text_smart(text)
-        logger.info(f"Processing {len(segments)} segments")
+        logger.info(f"Processing {len(segments)} segments with cross-language")
         
         # Synthesize each segment
         segment_files = []
@@ -494,7 +434,7 @@ class GoogleTTS:
             logger.debug(f"Synthesizing segment {i+1}/{len(segments)}")
             
             try:
-                audio_bytes = self._synthesize_single_with_strategy(segment, voice_id, language, strategy)
+                audio_bytes = self._synthesize_single_cross_language(segment, voice_id, voice_language, strategy)
                 segment_file = self._save_audio_bytes(audio_bytes, f"segment_{i}")
                 segment_files.append(segment_file)
                 
@@ -612,7 +552,7 @@ class GoogleTTS:
     
     def _save_audio_bytes(self, audio_bytes: bytes, prefix: str) -> Path:
         """Save audio bytes to temporary file"""
-        filename = f"google_bulletproof_{prefix}_{uuid.uuid4().hex[:8]}.wav"
+        filename = f"google_cross_lang_{prefix}_{uuid.uuid4().hex[:8]}.wav"
         file_path = TEMP_DIR / filename
         
         try:
@@ -626,7 +566,7 @@ class GoogleTTS:
     
     def _save_audio_segment(self, audio_segment: AudioSegment, prefix: str) -> Path:
         """Save audio segment to temporary file"""
-        filename = f"google_bulletproof_{prefix}_{uuid.uuid4().hex[:8]}.wav"
+        filename = f"google_cross_lang_{prefix}_{uuid.uuid4().hex[:8]}.wav"
         file_path = TEMP_DIR / filename
         
         try:
@@ -643,18 +583,18 @@ class GoogleTTS:
         method = "Cloud SDK" if self.use_cloud_sdk else "REST API" if self.api_key else "Not configured"
         
         return {
-            "name": "Google Cloud Text-to-Speech (Bulletproof)",
+            "name": "Google Cloud Text-to-Speech (Cross-Language)",
             "engine_id": "google",
             "available": self.is_available(),
             "method": method,
             "max_chars": MAX_BYTES_PER_REQUEST,
-            "features": ["bulletproof_synthesis", "voice_forcing", "comprehensive_fallbacks", "english_native_mode"],
+            "features": ["cross_language_synthesis", "no_voice_forcing", "no_ssml_default", "pt_voice_speaks_english"],
             "settings": {
                 "speaking_rate": SPEAKING_RATE,
-                "voice_forcing": ENABLE_VOICE_FORCING,
-                "english_voice_forcing": ENGLISH_VOICE_FORCING,
-                "fallback_attempts": len(FALLBACK_STRATEGIES),
-                "mapped_voices": len(VOICE_LANGUAGE_MAP)
+                "voice_forcing": ENABLE_VOICE_FORCING,  # False
+                "ssml_default": USE_SSML_BY_DEFAULT,   # False
+                "cross_language": True,
+                "fallback_attempts": len(FALLBACK_STRATEGIES)
             }
         }
 
@@ -662,11 +602,12 @@ class GoogleTTS:
 if __name__ == "__main__":
     import sys
     
-    print("🧪 Testing Google TTS Engine (Bulletproof Version)...")
+    print("🧪 Testing Google TTS Engine (Cross-Language Version)...")
     
     # Test configuration
-    test_voice = "en-US-Chirp3-HD-Luna"
-    test_text = "Good evening, ladies and gentlemen. Welcome aboard flight two zero zero to Bangkok."
+    test_voice = "pt-BR-Chirp3-HD-Laomedeia"  # Voz portuguesa
+    test_text_pt = "Bom dia, senhoras e senhores passageiros."
+    test_text_en = "Good evening, ladies and gentlemen. Welcome aboard."
     
     try:
         # Initialize engine
@@ -675,28 +616,29 @@ if __name__ == "__main__":
         print(f"🔧 Engine info: {engine.get_engine_info()}")
         print(f"✅ Available: {engine.is_available()}")
         print(f"✅ Voice validation: {engine.validate_voice_id(test_voice)}")
-        print(f"🇺🇸 English voice forcing: {ENGLISH_VOICE_FORCING}")
+        print(f"🌍 Cross-language: PT voice can speak English")
         
         if engine.is_available():
-            print(f"🔊 Synthesizing test text...")
+            print(f"\n🔊 Testing cross-language synthesis...")
+            print(f"Voice: {test_voice} (portuguesa)")
             
-            audio_file = engine.synthesize(test_text, "en-US", test_voice)
+            # Test 1: Portuguese text with Portuguese voice
+            print(f"\nTest 1: PT voice speaking PT text")
+            audio_file_pt = engine.synthesize(test_text_pt, "pt-BR", test_voice)
+            print(f"✅ PT→PT: {audio_file_pt}")
             
-            print(f"✅ Synthesis completed!")
-            print(f"📁 Output file: {audio_file}")
+            # Test 2: English text with Portuguese voice (CROSS-LANGUAGE)
+            print(f"\nTest 2: PT voice speaking EN text (cross-language)")
+            audio_file_en = engine.synthesize(test_text_en, "en", test_voice)
+            print(f"✅ PT→EN: {audio_file_en}")
             
-            # Get audio info
-            audio = AudioSegment.from_wav(audio_file)
-            duration = len(audio) / 1000
-            size = audio_file.stat().st_size / 1024
-            
-            print(f"📊 Duration: {duration:.1f}s")
-            print(f"📊 Size: {size:.1f} KB")
+            print(f"\n🎉 Cross-language synthesis working!")
+            print(f"Portuguese voice successfully spoke both PT and EN texts")
             
         else:
             print("❌ Engine not available - check configuration")
         
     except Exception as e:
         print(f"❌ Test failed: {e}")
-        logger.exception("Google TTS test failed")
+        logger.exception("Google TTS cross-language test failed")
         sys.exit(1)

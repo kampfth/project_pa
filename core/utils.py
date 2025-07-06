@@ -1,13 +1,13 @@
 """
-core/utils.py - Utilitários básicos do projeto
+core/utils.py - Utilitários com circular import CORRIGIDO
 
-Contém funções auxiliares, configuração de logs, carregamento de variáveis de ambiente
-e helpers para conversão de números/tempo.
+CORREÇÃO CRÍTICA: Removidas importações que causam circular import
 """
 
 import os
 import logging
 import string
+import sys
 from pathlib import Path
 from datetime import datetime
 
@@ -15,7 +15,7 @@ from datetime import datetime
 # CONFIGURAÇÃO DE CAMINHOS
 # ============================================
 
-# Caminho raiz do projeto (pasta pai de core/)
+# Caminho raiz do projeto (pasta pai de core/) - DEFINIDO PRIMEIRO
 ROOT = Path(__file__).resolve().parents[1]
 
 # Diretórios importantes
@@ -27,6 +27,79 @@ TEMP_DIR = ROOT / "core" / ".temp"
 # Criar diretórios essenciais
 for directory in [LOG_DIR, TEMP_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
+
+# ============================================
+# CONFIGURAÇÃO DE LOGGING MELHORADA
+# ============================================
+
+# Configurações de logging
+LOG_LEVEL = logging.DEBUG  # Permitir todos os níveis
+CONSOLE_LOG_LEVEL = logging.INFO  # Console menos verboso
+FILE_LOG_LEVEL = logging.DEBUG  # Arquivo mais detalhado
+LOG_FORMAT_CONSOLE = "%(levelname)s - %(message)s"
+LOG_FORMAT_FILE = "[%(asctime)s] %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
+
+# Cores para console (apenas em sistemas que suportam)
+COLORS = {
+    'DEBUG': '\033[36m',    # Cyan
+    'INFO': '\033[32m',     # Green
+    'WARNING': '\033[33m',  # Yellow
+    'ERROR': '\033[31m',    # Red
+    'CRITICAL': '\033[35m', # Magenta
+    'RESET': '\033[0m'      # Reset
+}
+
+class ColoredConsoleHandler(logging.StreamHandler):
+    """Handler de console com cores para melhor visibilidade"""
+    
+    def emit(self, record):
+        try:
+            # Adicionar cor se suportado
+            if hasattr(sys.stderr, 'isatty') and sys.stderr.isatty():
+                color = COLORS.get(record.levelname, '')
+                reset = COLORS['RESET']
+                record.levelname = f"{color}{record.levelname}{reset}"
+            
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+def setup_logger():
+    """
+    Configura sistema de logging melhorado com console E arquivo
+    """
+    # Criar diretório de logs
+    LOG_DIR.mkdir(exist_ok=True)
+    
+    # Configurar logger principal
+    logger = logging.getLogger("boarding_pa")
+    logger.setLevel(LOG_LEVEL)
+    
+    # Evitar duplicação de handlers
+    if logger.handlers:
+        logger.handlers.clear()
+    
+    # === HANDLER PARA ARQUIVO (DETALHADO) ===
+    log_file = LOG_DIR / f"{datetime.utcnow().date()}.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(FILE_LOG_LEVEL)
+    
+    file_formatter = logging.Formatter(LOG_FORMAT_FILE, "%Y-%m-%d %H:%M:%S")
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # === HANDLER PARA CONSOLE (VISUAL) ===
+    console_handler = ColoredConsoleHandler()
+    console_handler.setLevel(CONSOLE_LOG_LEVEL)
+    
+    console_formatter = logging.Formatter(LOG_FORMAT_CONSOLE)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Logger global melhorado
+logger = setup_logger()
 
 # ============================================
 # CARREGAMENTO DE VARIÁVEIS DE AMBIENTE
@@ -55,55 +128,16 @@ def load_env_variables():
                     key, value = line.split("=", 1)
                     ENV[key.strip()] = value.strip()
             
-            print(f"🔑 Loaded {len(ENV)} environment variables")
+            logger.info(f"Loaded {len(ENV)} environment variables")
             
         except Exception as e:
-            print(f"⚠️ Error loading environment file: {e}")
+            logger.error(f"Error loading environment file: {e}")
     else:
-        print(f"⚠️ Environment file not found: {ENV_FILE}")
-        print("💡 Create it with your API keys!")
+        logger.warning(f"Environment file not found: {ENV_FILE}")
+        logger.info("Create it with your API keys!")
 
 # Carregar variáveis na importação do módulo
 load_env_variables()
-
-# ============================================
-# CONFIGURAÇÃO DE LOGGING
-# ============================================
-
-def setup_logger():
-    """
-    Configura sistema de logging
-    """
-    # Criar diretório de logs
-    LOG_DIR.mkdir(exist_ok=True)
-    
-    # Configurar logger principal
-    logger = logging.getLogger("boarding_pa")
-    logger.setLevel(logging.INFO)
-    
-    # Evitar duplicação de handlers
-    if not logger.handlers:
-        # Handler para arquivo (log do dia)
-        log_file = LOG_DIR / f"{datetime.utcnow().date()}.log"
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        
-        # Formato do log
-        formatter = logging.Formatter(
-            "[%(asctime)s] %(levelname)s - %(message)s",
-            "%Y-%m-%d %H:%M:%S"
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        # Handler para console (opcional - descomente se quiser logs no terminal)
-        # console_handler = logging.StreamHandler()
-        # console_handler.setFormatter(formatter)
-        # logger.addHandler(console_handler)
-    
-    return logger
-
-# Logger global
-logger = setup_logger()
 
 # ============================================
 # HELPERS PARA NÚMEROS E TEMPO
@@ -159,7 +193,9 @@ def spaced_digits(num: str) -> str:
         if char.isdigit():
             words.append(_ONES[int(char)])
     
-    return " ".join(words)
+    result = " ".join(words)
+    logger.debug(f"Converted flight number: {num} -> {result}")
+    return result
 
 def seconds_to_words(seconds: int) -> str:
     """
@@ -199,11 +235,14 @@ def seconds_to_words(seconds: int) -> str:
     
     # Juntar com "and" se houver ambos
     if len(parts) == 2:
-        return " and ".join(parts)
+        result = " and ".join(parts)
     elif len(parts) == 1:
-        return parts[0]
+        result = parts[0]
     else:
-        return "zero minutes"
+        result = "zero minutes"
+    
+    logger.debug(f"Converted duration: {seconds}s -> {result}")
+    return result
 
 def greeting(hour: int) -> str:
     """
@@ -216,14 +255,17 @@ def greeting(hour: int) -> str:
         str: Saudação apropriada
     """
     if 5 <= hour < 12:
-        return "Good morning"
+        result = "Good morning"
     elif 12 <= hour < 18:
-        return "Good afternoon"
+        result = "Good afternoon"
     else:
-        return "Good evening"
+        result = "Good evening"
+    
+    logger.debug(f"Determined greeting for hour {hour}: {result}")
+    return result
 
 # ============================================
-# CLIENTE OPENAI
+# CLIENTE OPENAI MELHORADO (SEM IMPORTS PROBLEMÁTICOS)
 # ============================================
 
 def get_openai_client():
@@ -234,6 +276,7 @@ def get_openai_client():
         OpenAI client ou None se não configurado
     """
     try:
+        # Import local para evitar circular import
         from openai import OpenAI
         
         api_key = ENV.get("OPENAI_API_KEY")
@@ -242,18 +285,58 @@ def get_openai_client():
             return None
         
         client = OpenAI(api_key=api_key)
-        logger.info("🤖 OpenAI client initialized")
+        logger.info("OpenAI client initialized successfully")
         return client
         
     except ImportError:
-        logger.warning("OpenAI library not installed")
+        logger.error("OpenAI library not installed")
         return None
     except Exception as e:
-        logger.warning(f"Error initializing OpenAI client: {e}")
+        logger.error(f"Error initializing OpenAI client: {e}")
+        logger.exception("OpenAI client initialization failed")
         return None
 
 # ============================================
-# UTILITÁRIOS DE LIMPEZA
+# FUNÇÕES DE LOGGING ESPECIALIZADAS
+# ============================================
+
+def log_step_start(step_name: str, details: str = ""):
+    """Log início de step principal"""
+    logger.info(f"=" * 50)
+    logger.info(f"STARTING: {step_name}")
+    if details:
+        logger.info(f"Details: {details}")
+    logger.info(f"=" * 50)
+
+def log_step_complete(step_name: str, result: str = ""):
+    """Log conclusão de step principal"""
+    logger.info(f"COMPLETED: {step_name}")
+    if result:
+        logger.info(f"Result: {result}")
+
+def log_step_error(step_name: str, error: Exception):
+    """Log erro em step principal"""
+    logger.error(f"FAILED: {step_name}")
+    logger.error(f"Error: {str(error)}")
+    logger.exception(f"Stack trace for {step_name}")
+
+def log_api_call(api_name: str, endpoint: str, status: str = "starting"):
+    """Log chamadas de API"""
+    if status == "starting":
+        logger.debug(f"API CALL: {api_name} -> {endpoint}")
+    elif status == "success":
+        logger.info(f"API SUCCESS: {api_name}")
+    elif status == "error":
+        logger.error(f"API ERROR: {api_name} -> {endpoint}")
+
+def log_file_operation(operation: str, file_path: Path, details: str = ""):
+    """Log operações de arquivo"""
+    logger.debug(f"FILE {operation.upper()}: {file_path}")
+    if details:
+        logger.debug(f"  Details: {details}")
+
+# ============================================
+# UTILITÁRIOS DE LIMPEZA MELHORADOS
 # ============================================
 
 def clear_logs():
@@ -265,7 +348,7 @@ def clear_logs():
         today_log = LOG_DIR / f"{datetime.utcnow().date()}.log"
         if today_log.exists():
             today_log.write_text("", encoding="utf-8")
-            logger.info("🗑️ Logs cleared for new execution")
+            logger.info("Logs cleared for new execution")
     except Exception as e:
         logger.warning(f"Error clearing logs: {e}")
 
@@ -287,12 +370,9 @@ def clear_temp_files(silent: bool = True):
             import shutil
             
             # Contar arquivos antes de remover
-            if not silent:
-                for temp_file in TEMP_DIR.rglob("*"):
-                    if temp_file.is_file():
-                        cleaned_count += 1
-            else:
-                cleaned_count = len([f for f in TEMP_DIR.rglob("*") if f.is_file()])
+            for temp_file in TEMP_DIR.rglob("*"):
+                if temp_file.is_file():
+                    cleaned_count += 1
             
             # Remover toda a pasta
             shutil.rmtree(TEMP_DIR)
@@ -306,6 +386,7 @@ def clear_temp_files(silent: bool = True):
     except Exception as e:
         if not silent:
             logger.warning(f"Error during temp cleanup: {e}")
+            logger.exception("Temp cleanup error details")
     
     return cleaned_count
 
@@ -363,7 +444,13 @@ def get_project_info():
 # ============================================
 
 if __name__ == "__main__":
-    print("🧪 Testing utils.py...")
+    print("🧪 Testing fixed utils.py (no circular import)...")
+    
+    # Testar logging melhorado
+    logger.debug("This is a DEBUG message")
+    logger.info("This is an INFO message")
+    logger.warning("This is a WARNING message") 
+    logger.error("This is an ERROR message")
     
     # Testar variáveis de ambiente
     show_env_status()
@@ -387,4 +474,4 @@ if __name__ == "__main__":
     for key, value in info.items():
         print(f"  {key}: {value}")
     
-    print("\n✅ Utils test completed!")
+    print("\n✅ Fixed utils test completed - no circular import!")

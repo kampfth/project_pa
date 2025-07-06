@@ -1,554 +1,759 @@
 """
-core/translation_handler.py - Intelligent text generation and translation
+core/translation_handler.py - Sistema corrigido com logs detalhados
 
-Responsibilities:
-- Generate personalized announcement texts with flight data
-- Handle intelligent translations with proper flight number pronunciation
-- Manage template processing and variable substitution
-- Support multiple languages with aviation-specific formatting
+CORREÇÕES:
+1. USAR duration_text do SimBrief (não recalcular)
+2. LOGS MUITO DETALHADOS para debugging
+3. Aviação formal: "one hour" não "an hour"
 """
 
 import json
 import re
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
 from core.utils import ROOT, ENV, logger, get_openai_client
 
 # ============================================
-# CONFIGURAÇÕES AJUSTÁVEIS
+# CONFIGURAÇÕES OPENAI
 # ============================================
 
-# Translation settings
-TRANSLATION_MODEL = "gpt-4o-mini"
-TRANSLATION_TEMPERATURE = 0.2
-MAX_TRANSLATION_TOKENS = 800
+# Modelo OpenAI otimizado
+OPENAI_MODEL = "gpt-4o"  # Modelo mais avançado para traduções de qualidade
+OPENAI_TEMPERATURE = 0.1  # Baixa variabilidade para consistência
+OPENAI_MAX_TOKENS = 1000
+OPENAI_TIMEOUT = 30
 
-# Flight number pronunciation
-CONVERT_FLIGHT_NUMBERS_TO_DIGITS = True  # "1582" -> "one five eight two"
-USE_SMART_TIME_FORMATTING = True         # Proper singular/plural for time
+# System prompt para OpenAI
+OPENAI_SYSTEM_PROMPT = """You are a professional airline flight attendant translator. 
 
-# Translation quality
-APPLY_GRAMMAR_FIXES = True
-USE_FORMAL_LANGUAGE = True
+Your role is to translate boarding announcements with:
+- Professional aviation tone
+- Accurate terminology
+- Formal but warm style
+- Perfect grammar
+- NO word repetitions or duplications
+
+Always provide ONLY the translation, no explanations."""
+
+# User prompt template
+OPENAI_USER_PROMPT = """Translate this airline boarding announcement to {target_language}.
+
+Context: {airline_name} flight {flight_number} to {dest_city}
+
+Requirements:
+- Professional flight attendant tone
+- Formal language appropriate for aviation
+- Accurate aviation terminology
+- NO word duplications
+- Natural flow for spoken announcement
+
+Text to translate:
+{text}
+
+Provide only the translation:"""
+
+# ============================================
+# CONFIGURAÇÕES GERAIS
+# ============================================
 
 # Cache settings
-ENABLE_TRANSLATION_CACHE = True
-CACHE_DURATION_HOURS = 24
+CACHE_ENABLED = True
+CACHE_NEVER_EXPIRES = True  # Cache permanente
+CACHE_DIR = ROOT / "data" / "cache" / "translations"
 
-# ============================================
-# PATHS CONFIGURATION
-# ============================================
-
+# Template settings
 PROMPTS_DIR = ROOT / "data" / "prompts"
 AIRLINE_FILE = ROOT / "data" / "airline_profiles.json"
-CACHE_DIR = ROOT / "data" / "cache" / "translations"
+
+# Quality control
+ENABLE_DUPLICATION_FIX = True
+MAX_TRANSLATION_ATTEMPTS = 2
+
+# Detailed logging
+ENABLE_DETAILED_LOGS = True
+LOG_TEMPLATE_CONTENT = True
+LOG_TRANSLATION_CONTENT = True
+LOG_VARIABLE_SUBSTITUTION = True
+
+# Criar diretórios necessários
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================
-# GLOBAL FLIGHT NUMBER CONVERSION
+# LOGGING DETALHADO
 # ============================================
 
-DIGIT_WORDS = {
-    '0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
-    '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'
-}
+def log_detailed(step: str, content: str = "", data: dict = None):
+    """Log detalhado para debugging"""
+    if not ENABLE_DETAILED_LOGS:
+        return
+    
+    logger.info(f"🔍 DETAILED LOG: {step}")
+    if content:
+        logger.info(f"📄 Content: {content}")
+    if data:
+        logger.info(f"📊 Data: {json.dumps(data, indent=2, ensure_ascii=False)}")
+
+def log_template_processing(template_name: str, template_content: str, variables: dict, result: str):
+    """Log específico para processamento de template"""
+    if not LOG_TEMPLATE_CONTENT:
+        return
+    
+    logger.info(f"📝 TEMPLATE PROCESSING: {template_name}")
+    logger.info(f"📄 Template content (first 200 chars): {template_content[:200]}...")
+    logger.info(f"🔧 Variables used:")
+    for key, value in variables.items():
+        logger.info(f"    {key}: '{value}'")
+    logger.info(f"✅ Result (first 200 chars): {result[:200]}...")
+
+def log_translation_process(language: str, original: str, translated: str, cached: bool = False):
+    """Log específico para tradução"""
+    if not LOG_TRANSLATION_CONTENT:
+        return
+    
+    cache_status = "CACHED" if cached else "NEW"
+    logger.info(f"🌍 TRANSLATION TO {language}: {cache_status}")
+    logger.info(f"📥 Original: {original[:150]}...")
+    logger.info(f"📤 Translated: {translated[:150]}...")
+
+# ============================================
+# FUNÇÃO PRINCIPAL
+# ============================================
 
 def build_texts(simbrief_data: dict) -> dict:
     """
-    Build announcement texts for all configured languages
+    Gera textos para todos os idiomas configurados
     
     Args:
-        simbrief_data: Flight data from SimBrief
+        simbrief_data: Dados do voo do SimBrief
         
     Returns:
-        dict: Texts by language code {"en": "text", "pt-BR": "text", ...}
+        dict: Textos por idioma {"en": "texto", "pt-BR": "texto"}
     """
-    logger.info("Starting text generation and translation")
-    logger.debug(f"SimBrief data keys: {list(simbrief_data.keys())}")
-    
     try:
-        # Load airline configuration
+        logger.info("=" * 60)
+        logger.info("🌍 INICIANDO GERAÇÃO DE TEXTOS COM LOGS DETALHADOS")
+        logger.info("=" * 60)
+        
+        # Log dos dados SimBrief recebidos
+        log_detailed("SimBrief Data Received", data=simbrief_data)
+        
+        # 1. Carregar configuração da companhia
+        logger.info("📋 Step 1: Carregando configuração da companhia")
         airline_config = load_airline_config(simbrief_data["icao"])
-        logger.info(f"Airline config loaded for {simbrief_data['icao']}")
+        log_detailed("Airline Config Loaded", data=airline_config)
         
-        # Determine template type
-        template_name = determine_template_type()
-        logger.info(f"Using template: {template_name}")
+        # 2. Determinar tipo de template
+        logger.info("📄 Step 2: Determinando tipo de template")
+        template_type = get_template_type()
+        logger.info(f"✅ Template type determined: {template_type}")
         
-        # Process template with variables
-        english_text = load_and_process_template(template_name, simbrief_data)
-        logger.info(f"English template processed successfully")
+        # 3. Processar template em inglês
+        logger.info("🔤 Step 3: Processando template em inglês")
+        english_text = process_english_template(template_type, simbrief_data)
+        logger.info(f"✅ English template processed successfully")
+        logger.info(f"📏 English text length: {len(english_text)} characters")
         
-        # Start with English
+        # 4. Começar com inglês
         texts = {"en": english_text}
         
-        # Get target languages
+        # 5. Obter idiomas alvo
+        logger.info("🎯 Step 4: Obtendo idiomas alvo")
         target_languages = get_target_languages(airline_config)
-        logger.info(f"Target languages: {target_languages}")
+        logger.info(f"🌐 Target languages: {target_languages}")
         
-        # Generate translations
+        # 6. Traduzir para outros idiomas
+        logger.info("🔄 Step 5: Iniciando traduções")
         for language in target_languages:
             if language not in ["en", "en-US"]:
                 try:
-                    logger.info(f"Translating to {language}")
-                    translated_text = translate_with_global_formatting(
-                        english_text, language, airline_config, simbrief_data
-                    )
-                    texts[language] = translated_text
-                    logger.info(f"Translation to {language} completed")
-                    
+                    logger.info(f"🌍 Translating to {language}")
+                    translated = translate_text(english_text, language, simbrief_data)
+                    texts[language] = translated
+                    logger.info(f"✅ Translation to {language} completed successfully")
+                    logger.info(f"📏 {language} text length: {len(translated)} characters")
                 except Exception as e:
-                    logger.error(f"Translation failed for {language}: {e}")
-                    logger.exception(f"Translation error for {language}")
+                    logger.error(f"❌ Translation error for {language}: {e}")
+                    logger.exception(f"Translation exception for {language}")
         
-        logger.info(f"Text generation completed for: {list(texts.keys())}")
+        logger.info("=" * 60)
+        logger.info(f"🎉 GERAÇÃO DE TEXTOS CONCLUÍDA")
+        logger.info(f"📊 Languages generated: {list(texts.keys())}")
+        logger.info(f"📏 Total texts: {len(texts)}")
+        
+        # Log conteúdo final de cada idioma
+        for lang, text in texts.items():
+            logger.info(f"📝 {lang.upper()} FINAL TEXT:")
+            logger.info(f"   Length: {len(text)} chars")
+            logger.info(f"   Preview: {text[:100]}...")
+        
+        logger.info("=" * 60)
+        
         return texts
         
     except Exception as e:
-        logger.error(f"Text generation failed: {e}")
-        logger.exception("Text generation error")
+        logger.error(f"💥 ERRO CRÍTICO na geração de textos: {e}")
+        logger.exception("Stack trace completo:")
         raise
 
+# ============================================
+# FUNÇÕES DE SUPORTE
+# ============================================
+
 def load_airline_config(icao: str) -> dict:
-    """Load and validate airline configuration"""
-    logger.debug(f"Loading airline config for: {icao}")
-    
-    if not AIRLINE_FILE.exists():
-        logger.error(f"Airline profiles file not found: {AIRLINE_FILE}")
-        raise FileNotFoundError(f"Airline profiles not found: {AIRLINE_FILE}")
-    
+    """Carrega configuração da companhia aérea"""
     try:
+        logger.info(f"📂 Loading airline config for: {icao}")
+        
+        if not AIRLINE_FILE.exists():
+            raise FileNotFoundError(f"Arquivo de perfis não encontrado: {AIRLINE_FILE}")
+        
         with open(AIRLINE_FILE, 'r', encoding='utf-8') as f:
             config = json.load(f)
         
         if icao not in config:
-            logger.error(f"ICAO {icao} not found. Available: {list(config.keys())}")
-            raise ValueError(f"Airline {icao} not found in profiles")
+            available_airlines = list(config.keys())
+            logger.error(f"❌ Airline {icao} not found. Available: {available_airlines}")
+            raise ValueError(f"Companhia {icao} não encontrada")
         
         airline_config = config[icao]
-        logger.debug(f"Config loaded for {icao}: {list(airline_config.keys())}")
+        logger.info(f"✅ Airline config loaded successfully for {icao}")
+        
         return airline_config
         
     except Exception as e:
-        logger.error(f"Error loading airline config: {e}")
+        logger.error(f"💥 Erro ao carregar configuração da companhia: {e}")
         raise
 
-def determine_template_type() -> str:
-    """Determine template type from call stack"""
+def get_template_type() -> str:
+    """Determina o tipo de template baseado no contexto"""
     import inspect
     
+    logger.info("🔍 Analyzing call stack to determine template type")
+    
+    # Verificar stack de chamadas para determinar contexto
     for frame_info in inspect.stack():
         filename = frame_info.filename.lower()
+        logger.debug(f"   Checking frame: {filename}")
         if 'arrival' in filename:
-            logger.debug("Detected arrival context")
+            logger.info("✅ Template type: ARRIVAL")
             return "arrival"
         elif 'boarding' in filename:
-            logger.debug("Detected boarding context")
+            logger.info("✅ Template type: BOARDING (welcome)")
             return "welcome"
     
-    logger.debug("Defaulting to welcome template")
-    return "welcome"
+    logger.info("✅ Template type: DEFAULT (welcome)")
+    return "welcome"  # Padrão
 
-def load_and_process_template(template_name: str, simbrief_data: dict) -> str:
-    """Load template and process with safe variable substitution"""
-    logger.info(f"Loading template: {template_name}")
-    
-    template_path = PROMPTS_DIR / f"{template_name}.txt"
-    
-    if not template_path.exists():
-        logger.error(f"Template not found: {template_path}")
-        raise FileNotFoundError(f"Template not found: {template_path}")
-    
+def process_english_template(template_type: str, simbrief_data: dict) -> str:
+    """Processa template em inglês com variáveis"""
     try:
+        logger.info(f"📄 Processing English template: {template_type}")
+        
+        # Carregar template
+        template_path = PROMPTS_DIR / f"{template_type}.txt"
+        logger.info(f"📂 Template path: {template_path}")
+        
+        if not template_path.exists():
+            raise FileNotFoundError(f"Template não encontrado: {template_path}")
+        
         template = template_path.read_text(encoding="utf-8")
-        logger.debug(f"Template loaded, length: {len(template)} chars")
+        logger.info(f"📏 Template loaded, length: {len(template)} characters")
         
-        # Prepare variables
-        variables = prepare_template_variables(simbrief_data)
-        logger.info(f"Variables prepared: {list(variables.keys())}")
+        # Preparar variáveis
+        logger.info("🔧 Preparing template variables")
+        variables = prepare_variables(simbrief_data)
         
-        # Safe template processing
-        processed_text = safe_format_template(template, variables, template_name)
-        logger.info(f"Template processed successfully")
+        # Substituir variáveis
+        logger.info("🔄 Substituting variables in template")
+        processed_text = template.format(**variables)
+        
+        # Log do processamento do template
+        if LOG_TEMPLATE_CONTENT:
+            log_template_processing(template_type, template, variables, processed_text)
+        
+        # Verificar e corrigir duplicações
+        if ENABLE_DUPLICATION_FIX:
+            logger.info("🔍 Checking for duplications")
+            original_length = len(processed_text)
+            processed_text = fix_duplications(processed_text)
+            if len(processed_text) != original_length:
+                logger.info("✅ Duplications fixed")
+            else:
+                logger.info("✅ No duplications found")
+        
+        logger.info(f"✅ Template processing completed successfully")
+        logger.info(f"📏 Final processed text length: {len(processed_text)} characters")
         
         return processed_text
         
     except Exception as e:
-        logger.error(f"Template processing failed: {e}")
+        logger.error(f"💥 Erro ao processar template: {e}")
+        logger.exception("Template processing exception:")
         raise
 
-def prepare_template_variables(simbrief_data: dict) -> dict:
-    """Prepare all template variables with intelligent formatting"""
-    logger.debug("Preparing template variables")
+def prepare_variables(simbrief_data: dict) -> dict:
+    """Prepara variáveis para o template COM CORREÇÃO DE DURAÇÃO"""
+    logger.info("🔧 Preparing template variables")
     
     variables = {}
     
-    # === CORE VARIABLES ===
-    variables["greeting"] = determine_greeting()
+    # Saudação baseada na hora
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        variables["greeting"] = "Good morning"
+    elif 12 <= hour < 18:
+        variables["greeting"] = "Good afternoon"
+    else:
+        variables["greeting"] = "Good evening"
+    
+    logger.info(f"👋 Greeting determined: {variables['greeting']}")
+    
+    # Dados básicos
     variables["dest_city"] = simbrief_data.get("dest_city", "destination")
     variables["airline_name"] = simbrief_data.get("airline_name", "our airline")
     
-    # === FLIGHT NUMBER WITH DIGIT CONVERSION ===
-    flight_number = simbrief_data.get("flight_number", "unknown")
-    variables["flight_number"] = convert_flight_number_to_digits(flight_number)
+    # Número do voo (convertido para dígitos falados)
+    flight_number = simbrief_data.get("flight_number", "")
+    variables["flight_number"] = convert_flight_number(flight_number)
     
-    # === TIME FORMATTING ===
-    if "local_time" in simbrief_data:
-        variables["local_time"] = format_time_intelligently(simbrief_data["local_time"])
+    # CORREÇÃO CRÍTICA: USAR duration_text do SimBrief, NÃO recalcular
+    if "duration_text" in simbrief_data and simbrief_data["duration_text"]:
+        variables["duration"] = simbrief_data["duration_text"]
+        logger.info(f"✅ Using SimBrief duration_text: '{variables['duration']}'")
+    else:
+        # Fallback apenas se duration_text não existir
+        duration_seconds = simbrief_data.get("duration_seconds", 0)
+        variables["duration"] = format_duration_formal(duration_seconds)
+        logger.warning(f"⚠️ duration_text not found, calculated: '{variables['duration']}'")
     
-    # === TEMPERATURE ===
+    # Temperatura e hora local (para arrival)
     if "temperature" in simbrief_data:
         variables["temperature"] = simbrief_data["temperature"]
+        logger.info(f"🌡️ Temperature: {variables['temperature']}")
     
-    # === DURATION ===
-    if "duration_seconds" in simbrief_data:
-        variables["duration"] = format_duration_intelligently(simbrief_data["duration_seconds"])
+    if "local_time" in simbrief_data:
+        variables["local_time"] = simbrief_data["local_time"]
+        logger.info(f"🕐 Local time: {variables['local_time']}")
     
-    logger.debug(f"Variables prepared: {variables}")
+    # Log todas as variáveis preparadas
+    if LOG_VARIABLE_SUBSTITUTION:
+        logger.info("📋 ALL TEMPLATE VARIABLES PREPARED:")
+        for key, value in variables.items():
+            logger.info(f"   {key}: '{value}'")
+    
     return variables
 
-def determine_greeting() -> str:
-    """Determine greeting based on current time"""
+def convert_flight_number(flight_number: str) -> str:
+    """Converte número do voo para dígitos falados"""
     try:
-        current_hour = datetime.now().hour
+        logger.info(f"🔢 Converting flight number: {flight_number}")
         
-        if 5 <= current_hour < 12:
-            return "Good morning"
-        elif 12 <= current_hour < 18:
-            return "Good afternoon"
-        else:
-            return "Good evening"
-            
-    except Exception:
-        return "Good evening"
-
-def convert_flight_number_to_digits(flight_number: str) -> str:
-    """
-    Convert flight number to spoken digits (GLOBAL)
-    Examples: "1582" -> "one five eight two"
-              "200" -> "two zero zero"
-    """
-    if not CONVERT_FLIGHT_NUMBERS_TO_DIGITS:
-        return flight_number
-    
-    try:
-        # Extract only the numeric part
-        numeric_part = re.search(r'\d+', str(flight_number))
-        if not numeric_part:
+        # Extrair apenas números
+        numbers = re.findall(r'\d', str(flight_number))
+        if not numbers:
+            logger.warning(f"⚠️ No digits found in flight number: {flight_number}")
             return flight_number
         
-        number = numeric_part.group()
+        # Mapear dígitos para palavras
+        digit_words = {
+            '0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
+            '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'
+        }
         
-        # Convert each digit to word
-        digit_words = []
-        for digit in number:
-            digit_words.append(DIGIT_WORDS.get(digit, digit))
+        spoken_digits = [digit_words[digit] for digit in numbers]
+        result = ' '.join(spoken_digits)
         
-        converted = ' '.join(digit_words)
-        logger.debug(f"Flight number converted: {flight_number} -> {converted}")
-        return converted
+        logger.info(f"✅ Flight number converted: {flight_number} → {result}")
+        return result
         
     except Exception as e:
-        logger.warning(f"Flight number conversion failed: {e}")
+        logger.error(f"💥 Error converting flight number: {e}")
         return flight_number
 
-def format_time_intelligently(time_str: str) -> str:
-    """Format time with proper singular/plural grammar"""
-    if not USE_SMART_TIME_FORMATTING:
-        return time_str
-    
+def format_duration_formal(duration_seconds: int) -> str:
+    """
+    Formata duração do voo EM FORMATO FORMAL DE AVIAÇÃO
+    CORREÇÃO: Sempre usar "one hour" nunca "an hour"
+    """
     try:
-        # Extract hours and minutes
-        time_pattern = r'(\d+)\s*(?:hour|hours)?\s*(?:and|e)?\s*(\d+)\s*(?:minute|minutes)?'
-        match = re.search(time_pattern, time_str)
+        logger.info(f"⏱️ Formatting duration: {duration_seconds} seconds")
         
-        if match:
-            hours = int(match.group(1))
-            minutes = int(match.group(2))
-            
-            hour_word = "hour" if hours == 1 else "hours"
-            minute_word = "minute" if minutes == 1 else "minutes"
-            
-            if hours > 0 and minutes > 0:
-                return f"{hours} {hour_word} and {minutes} {minute_word}"
-            elif hours > 0:
-                return f"{hours} {hour_word}"
-            elif minutes > 0:
-                return f"{minutes} {minute_word}"
-        
-        return time_str
-        
-    except Exception:
-        return time_str
-
-def format_duration_intelligently(duration_seconds: int) -> str:
-    """Format flight duration with proper grammar"""
-    try:
         hours = duration_seconds // 3600
         minutes = (duration_seconds % 3600) // 60
         
-        hour_word = "hour" if hours == 1 else "hours"
-        minute_word = "minute" if minutes == 1 else "minutes"
+        logger.info(f"📊 Duration breakdown: {hours} hours, {minutes} minutes")
         
-        if hours > 0 and minutes > 0:
-            return f"{hours} {hour_word} and {minutes} {minute_word}"
-        elif hours > 0:
-            return f"{hours} {hour_word}"
-        elif minutes > 0:
-            return f"{minutes} {minute_word}"
+        parts = []
+        
+        if hours > 0:
+            # CORREÇÃO CRÍTICA: Usar números formais, não artigos
+            if hours == 1:
+                parts.append("one hour")  # ✅ FORMAL: "one hour" não "an hour"
+            else:
+                hour_words = {
+                    2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                    7: "seven", 8: "eight", 9: "nine", 10: "ten"
+                }
+                hour_word = hour_words.get(hours, str(hours))
+                parts.append(f"{hour_word} hours")
+        
+        if minutes > 0:
+            minute_words = {
+                1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+                6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+                11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+                16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
+                21: "twenty-one", 22: "twenty-two", 23: "twenty-three", 24: "twenty-four",
+                25: "twenty-five", 26: "twenty-six", 27: "twenty-seven", 28: "twenty-eight",
+                29: "twenty-nine", 30: "thirty", 40: "forty", 45: "forty-five", 50: "fifty"
+            }
+            minute_word = minute_words.get(minutes, str(minutes))
+            minute_unit = "minute" if minutes == 1 else "minutes"
+            parts.append(f"{minute_word} {minute_unit}")
+        
+        if len(parts) == 2:
+            result = f"{parts[0]} and {parts[1]}"
+        elif len(parts) == 1:
+            result = parts[0]
         else:
-            return "less than a minute"
+            result = "unknown duration"
+        
+        logger.info(f"✅ Duration formatted: {result}")
+        return result
             
-    except Exception:
+    except Exception as e:
+        logger.error(f"💥 Error formatting duration: {e}")
         return "unknown duration"
 
-def safe_format_template(template: str, variables: dict, template_name: str) -> str:
-    """Safely format template with comprehensive error handling"""
-    try:
-        # Find all required variables in template
-        required_vars = re.findall(r'\{([^}]+)\}', template)
-        logger.debug(f"Required variables in template: {required_vars}")
-        
-        # Check for missing variables
-        missing_vars = [var for var in required_vars if var not in variables]
-        if missing_vars:
-            logger.error(f"Missing variables in template {template_name}: {missing_vars}")
-            logger.error(f"Available variables: {list(variables.keys())}")
-            raise ValueError(f"Missing variables: {missing_vars}")
-        
-        # Format template
-        formatted = template.format(**variables)
-        logger.debug(f"Template formatted successfully")
-        return formatted
-        
-    except KeyError as e:
-        logger.error(f"KeyError in template {template_name}: {e}")
-        raise ValueError(f"Missing variable in template: {e}")
-    except Exception as e:
-        logger.error(f"Template formatting error: {e}")
-        raise
-
 def get_target_languages(airline_config: dict) -> list:
-    """Get target languages ensuring both native and English are included"""
-    native_lang = airline_config.get("language", "en")
-    
-    if isinstance(native_lang, str):
-        languages = [native_lang]
-    elif isinstance(native_lang, list):
-        languages = native_lang[:]
-    else:
-        languages = ["en"]
-    
-    # ALWAYS ensure English is included for international flights
-    if "en" not in languages and "en-US" not in languages:
-        languages.append("en")
-    
-    logger.debug(f"Target languages determined: {languages}")
-    return languages
-
-def translate_with_global_formatting(text: str, target_language: str, airline_config: dict, simbrief_data: dict) -> str:
-    """
-    Translate text with global aviation formatting standards
-    """
-    logger.info(f"Translating to {target_language} with global formatting")
-    
-    # Check cache
-    if ENABLE_TRANSLATION_CACHE:
-        cached = get_cached_translation(text, target_language)
-        if cached:
-            logger.info(f"Using cached translation for {target_language}")
-            return cached
-    
-    # Get OpenAI client
-    client = get_openai_client()
-    if not client:
-        logger.error(f"OpenAI not available for {target_language}")
-        return text
-    
-    # Build translation prompt
-    prompt = build_global_translation_prompt(text, target_language, airline_config, simbrief_data)
-    
+    """Obtém lista de idiomas alvo"""
     try:
+        logger.info("🌐 Determining target languages")
+        
+        language = airline_config.get("language", "en")
+        logger.info(f"📋 Airline language setting: {language}")
+        
+        if isinstance(language, str):
+            languages = [language]
+        elif isinstance(language, list):
+            languages = language[:]
+        else:
+            languages = ["en"]
+        
+        # Garantir que inglês está incluído
+        if "en" not in languages and "en-US" not in languages:
+            languages.append("en")
+            logger.info("✅ Added English to languages list")
+        
+        logger.info(f"🎯 Final target languages: {languages}")
+        return languages
+        
+    except Exception as e:
+        logger.error(f"💥 Error determining target languages: {e}")
+        return ["en"]
+
+# ============================================
+# SISTEMA DE TRADUÇÃO
+# ============================================
+
+def translate_text(text: str, target_language: str, simbrief_data: dict) -> str:
+    """
+    Traduz texto para idioma alvo
+    
+    Args:
+        text: Texto em inglês
+        target_language: Idioma alvo (ex: "pt-BR")
+        simbrief_data: Dados do voo
+        
+    Returns:
+        str: Texto traduzido
+    """
+    try:
+        logger.info(f"🌍 Starting translation to {target_language}")
+        logger.info(f"📏 Input text length: {len(text)} characters")
+        
+        # Verificar cache primeiro
+        if CACHE_ENABLED:
+            logger.info("💾 Checking translation cache")
+            cached = get_cached_translation(text, target_language)
+            if cached:
+                logger.info(f"✅ Found cached translation for {target_language}")
+                log_translation_process(target_language, text, cached, cached=True)
+                return cached
+            else:
+                logger.info(f"❌ No cached translation found for {target_language}")
+        
+        # Obter cliente OpenAI
+        logger.info("🤖 Getting OpenAI client")
+        client = get_openai_client()
+        if not client:
+            logger.warning(f"❌ OpenAI not available for {target_language}")
+            return text
+        
+        logger.info("✅ OpenAI client obtained successfully")
+        
+        # Fazer tradução
+        logger.info(f"🔄 Performing translation to {target_language}")
+        translated = perform_translation(client, text, target_language, simbrief_data)
+        
+        # Pós-processamento
+        logger.info("🔧 Post-processing translation")
+        original_translated = translated
+        translated = post_process_translation(translated, target_language)
+        
+        if translated != original_translated:
+            logger.info("✅ Post-processing applied changes")
+        else:
+            logger.info("✅ No post-processing changes needed")
+        
+        # Log da tradução
+        log_translation_process(target_language, text, translated, cached=False)
+        
+        # Salvar no cache
+        if CACHE_ENABLED:
+            logger.info("💾 Saving translation to cache")
+            save_to_cache(text, target_language, translated)
+        
+        logger.info(f"✅ Translation to {target_language} completed successfully")
+        return translated
+        
+    except Exception as e:
+        logger.error(f"💥 Translation error for {target_language}: {e}")
+        logger.exception(f"Translation exception for {target_language}:")
+        return text
+
+def perform_translation(client, text: str, target_language: str, simbrief_data: dict) -> str:
+    """Executa a tradução via OpenAI"""
+    try:
+        logger.info(f"🤖 Calling OpenAI API for {target_language}")
+        
+        # Preparar prompt
+        user_prompt = OPENAI_USER_PROMPT.format(
+            target_language=target_language,
+            airline_name=simbrief_data.get("airline_name", "the airline"),
+            flight_number=simbrief_data.get("flight_number", ""),
+            dest_city=simbrief_data.get("dest_city", "destination"),
+            text=text
+        )
+        
+        logger.info(f"📝 OpenAI prompt prepared (length: {len(user_prompt)} chars)")
+        logger.info(f"🔧 Using model: {OPENAI_MODEL}")
+        logger.info(f"🌡️ Temperature: {OPENAI_TEMPERATURE}")
+        
+        # Chamada para OpenAI
         response = client.chat.completions.create(
-            model=TRANSLATION_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=MAX_TRANSLATION_TOKENS,
-            temperature=TRANSLATION_TEMPERATURE
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": OPENAI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=OPENAI_MAX_TOKENS,
+            temperature=OPENAI_TEMPERATURE,
+            timeout=OPENAI_TIMEOUT
         )
         
         translated = response.choices[0].message.content.strip()
         
-        # Apply global post-processing
-        translated = apply_global_post_processing(translated, target_language)
+        logger.info(f"✅ OpenAI API call successful")
+        logger.info(f"📏 Translation length: {len(translated)} characters")
+        logger.info(f"🔍 Translation preview: {translated[:100]}...")
         
-        # Cache translation
-        if ENABLE_TRANSLATION_CACHE:
-            cache_translation(text, target_language, translated)
-        
-        logger.info(f"Translation to {target_language} completed")
         return translated
         
     except Exception as e:
-        logger.error(f"Translation failed for {target_language}: {e}")
+        logger.error(f"💥 OpenAI API call failed: {e}")
+        logger.exception("OpenAI API exception:")
+        raise
+
+def post_process_translation(text: str, target_language: str) -> str:
+    """Pós-processamento da tradução"""
+    try:
+        logger.info(f"🔧 Post-processing translation for {target_language}")
+        original_text = text
+        
+        # Remover aspas se presentes
+        text = text.strip()
+        if text.startswith('"') and text.endswith('"'):
+            text = text[1:-1].strip()
+            logger.info("✅ Removed surrounding quotes")
+        if text.startswith("'") and text.endswith("'"):
+            text = text[1:-1].strip()
+            logger.info("✅ Removed surrounding single quotes")
+        
+        # Corrigir duplicações
+        if ENABLE_DUPLICATION_FIX:
+            logger.info("🔍 Checking for duplications in translation")
+            before_fix = text
+            text = fix_duplications(text)
+            if text != before_fix:
+                logger.info("✅ Fixed duplications in translation")
+            else:
+                logger.info("✅ No duplications found in translation")
+        
+        # Correções específicas por idioma
+        if target_language == "pt-BR":
+            logger.info("🇧🇷 Applying Portuguese-specific fixes")
+            text = fix_portuguese_issues(text)
+        
+        if text != original_text:
+            logger.info("✅ Post-processing made changes")
+        else:
+            logger.info("✅ No post-processing changes needed")
+        
+        return text
+        
+    except Exception as e:
+        logger.error(f"💥 Post-processing error: {e}")
+        logger.exception("Post-processing exception:")
         return text
 
-def build_global_translation_prompt(text: str, target_language: str, airline_config: dict, simbrief_data: dict) -> str:
-    """Build aviation-standard translation prompt"""
+def fix_duplications(text: str) -> str:
+    """
+    Corrige duplicações de palavras como 'passageiros passageiros'
     
-    gender = airline_config.get("genre_native", "female")
-    airline_name = simbrief_data.get("airline_name", "the airline")
-    dest_city = simbrief_data.get("dest_city", "destination")
-    
-    prompt = f"""Translate this aviation announcement to {target_language}.
-
-CONTEXT:
-- Airline: {airline_name}
-- Destination: {dest_city}
-- Voice: {gender} flight attendant
-
-AVIATION TRANSLATION REQUIREMENTS:
-1. Use formal, professional aviation language
-2. Keep flight numbers as individual digits (never change "one five eight two")
-3. Use proper time expressions with correct singular/plural
-4. Maintain exact same information and meaning
-5. Use respectful, courteous tone appropriate for aviation
-6. Follow aviation industry standards for {target_language}
-
-CRITICAL RULES:
-- Flight numbers must remain as spoken digits
-- Time expressions must be grammatically correct
-- Use formal pronouns and address passengers respectfully
-- Keep all safety and procedural information accurate
-
-TEXT TO TRANSLATE:
-\"\"\"{text}\"\"\""""
-
-    # Add language-specific aviation standards
-    if target_language == "pt-BR":
-        prompt += """
-
-PORTUGUESE AVIATION STANDARDS:
-- Use "senhoras e senhores passageiros" for formal address
-- Time: "são X horas e Y minutos" (plural) or "é 1 hora" (singular)
-- Flight numbers: keep as individual digits (um cinco oito dois)
-- Use formal "vocês" treatment throughout
-- Aviation terminology: "voo", "tripulação", "comandante", "portão"
-"""
-    
-    elif target_language == "es-ES":
-        prompt += """
-
-SPANISH AVIATION STANDARDS:
-- Use "señoras y señores pasajeros" for formal address
-- Use formal "ustedes" form throughout
-- Keep flight numbers as individual digits
-- Proper Spanish aviation terminology
-"""
-    
-    elif target_language == "fr-FR":
-        prompt += """
-
-FRENCH AVIATION STANDARDS:
-- Use "mesdames et messieurs" for formal address
-- Use formal "vous" form throughout
-- Keep flight numbers as individual digits
-- Proper French aviation terminology
-"""
-    
-    return prompt
-
-def apply_global_post_processing(text: str, target_language: str) -> str:
-    """Apply global post-processing fixes for all languages"""
-    if not APPLY_GRAMMAR_FIXES:
+    Args:
+        text: Texto com possíveis duplicações
+        
+    Returns:
+        str: Texto sem duplicações
+    """
+    try:
+        logger.info("🔍 Checking for word duplications")
+        
+        # Padrão para detectar palavras repetidas consecutivas
+        # Exemplo: "passageiros passageiros" -> "passageiros"
+        duplication_pattern = r'\b(\w+)\s+\1\b'
+        
+        # Encontrar duplicações
+        duplications = re.findall(duplication_pattern, text, re.IGNORECASE)
+        
+        if duplications:
+            logger.warning(f"⚠️ Found duplications: {duplications}")
+            
+            # Corrigir duplicações
+            fixed_text = re.sub(duplication_pattern, r'\1', text, flags=re.IGNORECASE)
+            
+            logger.info("✅ Duplications fixed successfully")
+            return fixed_text
+        
+        logger.info("✅ No duplications found")
         return text
-    
-    # Remove quote wrapping
-    processed = text.strip()
-    while ((processed.startswith('"') and processed.endswith('"')) or 
-           (processed.startswith("'") and processed.endswith("'"))):
-        processed = processed[1:-1].strip()
-    
-    # Remove quote blocks
-    if processed.startswith('"""') and processed.endswith('"""'):
-        processed = processed[3:-3].strip()
-    
-    # Language-specific fixes
-    if target_language == "pt-BR":
-        processed = apply_portuguese_global_fixes(processed)
-    elif target_language == "es-ES":
-        processed = apply_spanish_global_fixes(processed)
-    elif target_language == "fr-FR":
-        processed = apply_french_global_fixes(processed)
-    
-    return processed
-
-def apply_portuguese_global_fixes(text: str) -> str:
-    """Apply Portuguese aviation-specific fixes"""
-    fixes = [
-        # Time expressions
-        (r'\bhora local e (\d+) horas?\b', r'horário local são \1 horas'),
-        (r'\bhora local e (\d+) hora\b', r'horário local é \1 hora'),
-        (r'\bé (\d+) horas e (\d+) minutos?\b', r'são \1 horas e \2 minutos'),
-        (r'\bé (\d+) hora e (\d+) minutos?\b', r'é \1 hora e \2 minutos'),
         
-        # Ensure proper address
-        (r'\bSenhoras e senhores\b', r'Senhoras e senhores passageiros'),
+    except Exception as e:
+        logger.error(f"💥 Error fixing duplications: {e}")
+        return text
+
+def fix_portuguese_issues(text: str) -> str:
+    """Correções específicas para português"""
+    try:
+        logger.info("🇧🇷 Applying Portuguese-specific corrections")
         
-        # Fix common aviation terms
-        (r'\bcinto de segurança\b', r'cinto de segurança'),
-        (r'\bcompartimentos superiores\b', r'compartimentos superiores'),
-    ]
-    
-    for pattern, replacement in fixes:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    
-    return text
+        # Correções comuns
+        fixes = [
+            # Termos de aviação
+            (r'\bcompanhia aérea\b', r'companhia'),
+            (r'\bvôo\b', r'voo'),
+            
+            # Duplicações específicas do português
+            (r'\bsenhoras senhoras\b', r'senhoras'),
+            (r'\bsenhores senhores\b', r'senhores'),
+            (r'\bpassageiros passageiros\b', r'passageiros'),
+        ]
+        
+        fixes_applied = 0
+        for pattern, replacement in fixes:
+            original = text
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            if text != original:
+                fixes_applied += 1
+                logger.info(f"✅ Applied Portuguese fix: {pattern} → {replacement}")
+        
+        if fixes_applied > 0:
+            logger.info(f"✅ Applied {fixes_applied} Portuguese-specific fixes")
+        else:
+            logger.info("✅ No Portuguese-specific fixes needed")
+        
+        return text
+        
+    except Exception as e:
+        logger.error(f"💥 Error in Portuguese fixes: {e}")
+        return text
 
-def apply_spanish_global_fixes(text: str) -> str:
-    """Apply Spanish aviation-specific fixes"""
-    # Add Spanish-specific fixes as needed
-    return text
+# ============================================
+# SISTEMA DE CACHE
+# ============================================
 
-def apply_french_global_fixes(text: str) -> str:
-    """Apply French aviation-specific fixes"""
-    # Add French-specific fixes as needed
-    return text
+def get_cache_filename(target_language: str) -> str:
+    """Gera nome de arquivo de cache descritivo"""
+    template_type = get_template_type()
+    filename = f"{target_language}_static_{template_type}.txt"
+    logger.debug(f"💾 Cache filename: {filename}")
+    return filename
 
 def get_cached_translation(text: str, target_language: str) -> str:
-    """Get cached translation if available"""
-    if not ENABLE_TRANSLATION_CACHE:
-        return None
-    
+    """Obtém tradução do cache se disponível"""
     try:
-        import hashlib
-        text_hash = hashlib.md5(text.encode()).hexdigest()[:12]
-        cache_file = CACHE_DIR / f"{target_language}_{text_hash}.txt"
+        cache_file = CACHE_DIR / get_cache_filename(target_language)
+        logger.debug(f"💾 Checking cache file: {cache_file}")
         
         if cache_file.exists():
-            from datetime import datetime, timedelta
-            cache_age = datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)
-            
-            if cache_age <= timedelta(hours=CACHE_DURATION_HOURS):
-                return cache_file.read_text(encoding="utf-8")
-            else:
-                cache_file.unlink()
+            cached_content = cache_file.read_text(encoding="utf-8")
+            logger.info(f"✅ Found cached translation: {cache_file.name}")
+            return cached_content
         
+        logger.info(f"❌ No cache file found: {cache_file.name}")
         return None
         
-    except Exception:
+    except Exception as e:
+        logger.error(f"💥 Error reading cache: {e}")
         return None
 
-def cache_translation(text: str, target_language: str, translation: str):
-    """Cache translation for future use"""
-    if not ENABLE_TRANSLATION_CACHE:
-        return
+def save_to_cache(original_text: str, target_language: str, translated_text: str):
+    """Salva tradução no cache permanentemente"""
+    try:
+        cache_file = CACHE_DIR / get_cache_filename(target_language)
+        cache_file.write_text(translated_text, encoding="utf-8")
+        
+        logger.info(f"✅ Translation saved to cache: {cache_file.name}")
+        logger.info(f"📏 Cached content length: {len(translated_text)} characters")
+        
+    except Exception as e:
+        logger.error(f"💥 Error saving to cache: {e}")
+
+# ============================================
+# TESTE E DEBUG
+# ============================================
+
+if __name__ == "__main__":
+    # Teste simples
+    print("🧪 Testando sistema de tradução com logs detalhados")
+    
+    # Dados de teste
+    test_simbrief = {
+        "icao": "TAM",
+        "airline_name": "LATAM Brasil",
+        "flight_number": "4172",
+        "dest_city": "Porto Alegre",
+        "duration_seconds": 5220,
+        "duration_text": "one hour and twenty-seven minutes"  # TESTE CRÍTICO
+    }
     
     try:
-        import hashlib
-        text_hash = hashlib.md5(text.encode()).hexdigest()[:12]
-        cache_file = CACHE_DIR / f"{target_language}_{text_hash}.txt"
-        cache_file.write_text(translation, encoding="utf-8")
+        # Testar geração de textos
+        texts = build_texts(test_simbrief)
         
-    except Exception:
-        pass
+        print(f"✅ Textos gerados: {list(texts.keys())}")
+        
+        for lang, text in texts.items():
+            print(f"\n{lang.upper()}:")
+            print("-" * 40)
+            print(text[:200] + "..." if len(text) > 200 else text)
+        
+        print("\n✅ Teste concluído com sucesso!")
+        
+    except Exception as e:
+        print(f"❌ Erro no teste: {e}")
+        import traceback
+        traceback.print_exc()
