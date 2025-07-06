@@ -1,7 +1,0 @@
-{greeting}, ladies and gentlemen. On behalf of {airline_name}, it is my pleasure to welcome you aboard flight {flight_number} with service to {dest_city}. This flight will take approximately {duration}, and until then, our crew will be pleased to serve you.
-
-Federal regulations require that carry-on items are stowed prior to closing the aircraft door. Your items may be placed in an overhead compartment, or completely under the seat in front of you. Use caution when placing items in or removing them from the overhead compartment, and let us know if we may assist you.
-
-In order to expedite the boarding process, please be seated as quickly as possible after stowing your carry-on items. Take a moment to review the Safety Instructions card in your seat pocket.
-
-Passengers seated in the exit rows are also asked to review the exit row seating requirements. If you are unable or unwilling to perform the functions described on the card, please ask to be re-seated. We thank you for your attention and wish you a pleasant journey.
