@@ -1,0 +1,7 @@
+Ladies and gentlemen, welcome to {dest_city}. The local time {local_time}, and the temperature {temperature}.
+
+For your comfort and safety, please remain seated with your seat belt fastened until we have parked at the gate and the captain has switched off the seat-belt sign.
+
+Take care when opening the overhead bins—items may have shifted during the flight. Before leaving, please check the seat pocket and area around you for any personal belongings.
+
+On behalf of our entire crew, thank you for flying with us today. We look forward to welcoming you on board again soon.

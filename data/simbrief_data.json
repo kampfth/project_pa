@@ -1,0 +1,12 @@
+{
+  "icao": "THA",
+  "airline_name": "Thai Airways",
+  "flight_number": "403",
+  "flight_number_text": "four zero three",
+  "dest_icao": "WSSS",
+  "dest_name": "Changi",
+  "dest_city": "Singapore",
+  "duration_seconds": 7020,
+  "duration_text": "one hour and fifty-seven minutes",
+  "greeting": "Good morning"
+}
